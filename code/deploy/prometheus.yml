@@ -1,0 +1,42 @@
+# Minimal Prometheus scrape config for one or more engine servers.
+# Open /metrics in a browser first and copy the exact metric names for your version.
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: vllm
+    static_configs:
+      - targets: ["localhost:8000"]
+  - job_name: sglang          # start SGLang with --enable-metrics
+    static_configs:
+      - targets: ["localhost:30000"]
+  # Example for Kubernetes: find the pods by their prometheus.io/* annotations (see k8s.yaml).
+  # Use it only when Prometheus runs inside the cluster and may list pods (RBAC).
+  # If you run Prometheus on your laptop, delete this job.
+  - job_name: llm-pods
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+# Good first panels in Grafana (copy exact names from /metrics; they change by version):
+#   vLLM:   vllm:num_requests_running, vllm:num_requests_waiting, vllm:kv_cache_usage_perc,
+#           vllm:time_to_first_token_seconds, vllm:num_preemptions
+#   SGLang: sglang:num_running_reqs, sglang:num_queue_reqs, sglang:token_usage,
+#           sglang:time_to_first_token_seconds, sglang:cache_hit_rate,
+#           sglang:num_retracted_requests_total
+# Counters end in _total on /metrics (for example vllm:prompt_tokens_total). Copy names from your server.
+# Good first alerts:
+#   waiting requests > 0 for 5 min, p99 TTFT above target, cache usage > 95%,
+#   preemptions / retractions rising (the KV cache is too small for the load)

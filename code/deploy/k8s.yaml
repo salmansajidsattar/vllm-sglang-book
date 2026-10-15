@@ -1,0 +1,80 @@
+# Two replicas of vLLM (one GPU each) behind a Service.
+# Apply: kubectl apply -f k8s.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm
+spec:
+  replicas: 2
+  # With one GPU per pod and only two GPUs, a surge pod would stay Pending.
+  # So replace one pod at a time without asking for a third GPU.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxSurge: 0, maxUnavailable: 1}
+  selector:
+    matchLabels: {app: llm}
+  template:
+    metadata:
+      labels: {app: llm}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      # time Kubernetes waits after the stop signal before it kills the pod.
+      # Long answers need time to finish: set it above your longest answer.
+      terminationGracePeriodSeconds: 120
+      # GPU nodes are often tainted. Uncomment and match YOUR cluster's taint:
+      # tolerations:
+      #   - key: nvidia.com/gpu
+      #     operator: Exists
+      #     effect: NoSchedule
+      containers:
+        - name: vllm
+          image: YOUR_REGISTRY/llm-vllm:1.0   # image built from the Dockerfile
+          args: ["--model", "Qwen/Qwen2.5-1.5B-Instruct", "--port", "8000",
+                 "--gpu-memory-utilization", "0.90", "--max-model-len", "8192",
+                 "--shutdown-timeout", "100"]
+          # shutdown-timeout (100) + preStop sleep (15) must stay below terminationGracePeriodSeconds (120).
+          # Remove --shutdown-timeout if your vLLM version does not have it.
+          ports:
+            - containerPort: 8000
+          lifecycle:
+            preStop:
+              # wait a few seconds so the Service stops sending new requests
+              # before the server gets the stop signal (needs `sleep` in the image)
+              exec: {command: ["sleep", "15"]}
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          # model loading takes minutes: allow up to 10 min to start
+          startupProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 4Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm
+spec:
+  selector: {app: llm}
+  ports:
+    - port: 80
+      targetPort: 8000
+# SGLang variant: change the container to the SGLang image and use
+#   command: ["python", "-m", "sglang.launch_server"]
+#   args: ["--model-path", "...", "--host", "0.0.0.0", "--port", "30000", "--enable-metrics"]
+# and set containerPort / probe port / targetPort to 30000.
